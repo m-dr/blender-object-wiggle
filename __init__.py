@@ -1,21 +1,23 @@
 import bpy
 import bpy_extras.anim_utils
+import math
 import random
-from mathutils import Vector
+from mathutils import noise, Vector
 from bpy.app.handlers import persistent
 
 bl_info = {
     "name": "Object Wiggle",
     "author": "m-dr",
-    "version": (0, 1, 3),
+    "version": (0, 1, 4),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Wiggle",
-    "description": "Procedural noise transforms for objects with frame ranges, spatial offsets, multi-object editing and Blender 5.2 slotted action support",
+    "description": "Procedural noise transforms for objects with seamless loops, frame ranges, spatial offsets, multi-object editing and Blender 5.2 slotted action support",
     "category": "Animation",
 }
 
 WIGGLE_ROTATION_MOD = "Wiggle Rotation"
 WIGGLE_LOCATION_MOD = "Wiggle Location"
+WIGGLE_CYCLES_MOD = "Wiggle Cycles"
 WIGGLE_MOD_PREFIX = "Wiggle"
 
 _is_syncing_props = False
@@ -89,25 +91,24 @@ def ensure_fcurve(ob, data_path, index, frame=1):
 
 def find_wiggle_modifier(fcu, name_prefix=WIGGLE_MOD_PREFIX):
     """
-    Finds a noise modifier created by Object Wiggle on an fcurve,
-    distinguishing it from user-created noise modifiers.
+    Finds a modifier created by Object Wiggle on an fcurve.
     """
     if not fcu:
         return None
     for mod in fcu.modifiers:
-        if mod.type == 'NOISE' and mod.name.startswith(name_prefix):
+        if mod.name.startswith(name_prefix):
             return mod
     return None
 
 
 def has_wiggle_modifiers(ob):
     """
-    Checks if an object currently has any active Wiggle modifiers.
+    Checks if an object currently has any active Wiggle modifiers or loop animation.
     """
     fcurves = get_object_fcurves(ob)
     for fc in fcurves:
         if fc.data_path in ("delta_rotation_euler", "delta_location"):
-            if find_wiggle_modifier(fc):
+            if find_wiggle_modifier(fc) or len(fc.keyframe_points) > 1:
                 return True
     return False
 
@@ -123,7 +124,6 @@ def calculate_spatial_offset(ob, props):
         obj_hash = (abs(hash(ob.name)) % 100000) * 13.37
         return seed_base + (obj_hash if props.use_unique_seed else 0.0)
 
-    # True evaluated world resting coordinates (excluding active delta translation)
     world_pos = ob.matrix_world.translation - Vector(ob.delta_location)
     guide = props.guide_object
 
@@ -152,9 +152,23 @@ def calculate_spatial_offset(ob, props):
     return seed_base
 
 
+def evaluate_circular_noise(frame, f_start, f_end, speed, strength, seed_z, phase_offset=0.0):
+    """
+    Evaluates 2D/3D circular periodic noise for seamless looping without NLA.
+    """
+    length = max(f_end - f_start, 1.0)
+    angle = 2.0 * math.pi * (frame - f_start) / length + (phase_offset * 0.02)
+    freq = max(50.0 / max(speed, 0.001), 0.1)
+    nx = math.cos(angle) * freq
+    ny = math.sin(angle) * freq
+    nz = seed_z * 0.01
+    val = noise.turbulence_vector(Vector((nx, ny, nz)), 3, False).x
+    return val * strength
+
+
 def apply_wiggle_to_object(ob, props=None):
     """
-    Applies or updates Wiggle noise modifiers on an object's delta transforms.
+    Applies or updates Wiggle noise or seamless circular loop on an object's delta transforms.
     """
     if not ob:
         return
@@ -163,71 +177,185 @@ def apply_wiggle_to_object(ob, props=None):
 
     spatial_offset = calculate_spatial_offset(ob, props)
 
-    # --- Rotation Wiggle ---
-    if props.enable_rotation:
-        for idx in range(3):
-            fc = ensure_fcurve(ob, "delta_rotation_euler", idx)
-            if not fc:
-                continue
-            mod = find_wiggle_modifier(fc, WIGGLE_ROTATION_MOD) or find_wiggle_modifier(fc, WIGGLE_MOD_PREFIX)
-            if mod is None:
-                mod = fc.modifiers.new(type='NOISE')
-                mod.name = WIGGLE_ROTATION_MOD
+    if props.enable_loop:
+        # --- Seamless Loop Mode (Circular Noise + Cycles Modifier) ---
+        f_start = int(props.loop_start)
+        f_end = int(props.loop_end)
+        if f_end <= f_start:
+            f_end = f_start + 1
+        count = f_end - f_start + 1
 
-            mod.scale = max(props.rot_speed, 0.001)
-            mod.strength = props.rot_strength
-            mod.phase = props.rot_phase + spatial_offset + (idx * 1731.5)
-            mod.use_influence = True
-            mod.influence = props.rot_influence
+        # Rotation Loop
+        if props.enable_rotation:
+            for idx in range(3):
+                fc = ensure_fcurve(ob, "delta_rotation_euler", idx, frame=f_start)
+                if not fc:
+                    continue
+                # Remove noise modifiers
+                for m in list(fc.modifiers):
+                    if m.name.startswith(WIGGLE_MOD_PREFIX) and m.type == 'NOISE':
+                        fc.modifiers.remove(m)
 
-            # Restrict Frame Range (Unified across location and rotation)
-            mod.use_restricted_range = props.use_restricted_range
-            if props.use_restricted_range:
-                mod.frame_start = props.frame_start
-                mod.frame_end = props.frame_end
-                mod.blend_in = max(props.blend_in, 0.0)
-                mod.blend_out = max(props.blend_out, 0.0)
+                # Populate loop keyframe points
+                fc.keyframe_points.clear()
+                fc.keyframe_points.add(count)
+                seed_z = (props.seed * 1000.0) + spatial_offset + (idx * 1731.5)
+                eff_strength = props.rot_strength * props.rot_influence
+
+                for i, f in enumerate(range(f_start, f_end + 1)):
+                    v = evaluate_circular_noise(f, f_start, f_end, props.rot_speed, eff_strength, seed_z, props.rot_phase)
+                    kp = fc.keyframe_points[i]
+                    kp.co = (f, v)
+                    kp.handle_left_type = 'AUTO'
+                    kp.handle_right_type = 'AUTO'
+                fc.update()
+
+                # Cycles modifier for repeat
+                if props.loop_repeat:
+                    cyc = next((m for m in fc.modifiers if m.type == 'CYCLES' and m.name == WIGGLE_CYCLES_MOD), None)
+                    if not cyc:
+                        cyc = fc.modifiers.new(type='CYCLES')
+                        cyc.name = WIGGLE_CYCLES_MOD
+                    cyc.mode_before = 'REPEAT'
+                    cyc.mode_after = 'REPEAT'
+                else:
+                    for m in list(fc.modifiers):
+                        if m.type == 'CYCLES' and m.name == WIGGLE_CYCLES_MOD:
+                            fc.modifiers.remove(m)
+        else:
+            fcurves = get_object_fcurves(ob)
+            for fc in fcurves:
+                if fc.data_path == "delta_rotation_euler":
+                    for m in list(fc.modifiers):
+                        if m.name.startswith(WIGGLE_MOD_PREFIX):
+                            fc.modifiers.remove(m)
+                    if len(fc.keyframe_points) > 1:
+                        fc.keyframe_points.clear()
+                        fc.keyframe_points.add(1)
+                        fc.keyframe_points[0].co = (1.0, 0.0)
+
+        # Location Loop
+        if props.enable_location:
+            for idx in range(3):
+                fc = ensure_fcurve(ob, "delta_location", idx, frame=f_start)
+                if not fc:
+                    continue
+                # Remove noise modifiers
+                for m in list(fc.modifiers):
+                    if m.name.startswith(WIGGLE_MOD_PREFIX) and m.type == 'NOISE':
+                        fc.modifiers.remove(m)
+
+                # Populate loop keyframe points
+                fc.keyframe_points.clear()
+                fc.keyframe_points.add(count)
+                seed_z = (props.seed * 1000.0) + spatial_offset + 50000.0 + (idx * 1731.5)
+                eff_strength = props.loc_strength * props.loc_influence
+
+                for i, f in enumerate(range(f_start, f_end + 1)):
+                    v = evaluate_circular_noise(f, f_start, f_end, props.loc_speed, eff_strength, seed_z, props.loc_phase)
+                    kp = fc.keyframe_points[i]
+                    kp.co = (f, v)
+                    kp.handle_left_type = 'AUTO'
+                    kp.handle_right_type = 'AUTO'
+                fc.update()
+
+                if props.loop_repeat:
+                    cyc = next((m for m in fc.modifiers if m.type == 'CYCLES' and m.name == WIGGLE_CYCLES_MOD), None)
+                    if not cyc:
+                        cyc = fc.modifiers.new(type='CYCLES')
+                        cyc.name = WIGGLE_CYCLES_MOD
+                    cyc.mode_before = 'REPEAT'
+                    cyc.mode_after = 'REPEAT'
+                else:
+                    for m in list(fc.modifiers):
+                        if m.type == 'CYCLES' and m.name == WIGGLE_CYCLES_MOD:
+                            fc.modifiers.remove(m)
+        else:
+            fcurves = get_object_fcurves(ob)
+            for fc in fcurves:
+                if fc.data_path == "delta_location":
+                    for m in list(fc.modifiers):
+                        if m.name.startswith(WIGGLE_MOD_PREFIX):
+                            fc.modifiers.remove(m)
+                    if len(fc.keyframe_points) > 1:
+                        fc.keyframe_points.clear()
+                        fc.keyframe_points.add(1)
+                        fc.keyframe_points[0].co = (1.0, 0.0)
+
     else:
-        # Remove rotation wiggle if disabled
+        # --- Procedural F-Curve Noise Modifier Mode ---
         fcurves = get_object_fcurves(ob)
         for fc in fcurves:
-            if fc.data_path == "delta_rotation_euler":
-                mod = find_wiggle_modifier(fc, WIGGLE_MOD_PREFIX)
-                if mod:
-                    fc.modifiers.remove(mod)
+            if fc.data_path in ("delta_rotation_euler", "delta_location"):
+                for m in list(fc.modifiers):
+                    if m.type == 'CYCLES' and m.name == WIGGLE_CYCLES_MOD:
+                        fc.modifiers.remove(m)
+                if len(fc.keyframe_points) > 1:
+                    fc.keyframe_points.clear()
+                    fc.keyframe_points.add(1)
+                    fc.keyframe_points[0].co = (1.0, 0.0)
 
-    # --- Location Wiggle ---
-    if props.enable_location:
-        for idx in range(3):
-            fc = ensure_fcurve(ob, "delta_location", idx)
-            if not fc:
-                continue
-            mod = find_wiggle_modifier(fc, WIGGLE_LOCATION_MOD) or find_wiggle_modifier(fc, WIGGLE_MOD_PREFIX)
-            if mod is None:
-                mod = fc.modifiers.new(type='NOISE')
-                mod.name = WIGGLE_LOCATION_MOD
+        # Rotation Wiggle
+        if props.enable_rotation:
+            for idx in range(3):
+                fc = ensure_fcurve(ob, "delta_rotation_euler", idx)
+                if not fc:
+                    continue
+                mod = find_wiggle_modifier(fc, WIGGLE_ROTATION_MOD) or find_wiggle_modifier(fc, WIGGLE_MOD_PREFIX)
+                if mod is None:
+                    mod = fc.modifiers.new(type='NOISE')
+                    mod.name = WIGGLE_ROTATION_MOD
 
-            mod.scale = max(props.loc_speed, 0.001)
-            mod.strength = props.loc_strength
-            mod.phase = props.loc_phase + spatial_offset + 50000.0 + (idx * 1731.5)
-            mod.use_influence = True
-            mod.influence = props.loc_influence
+                mod.scale = max(props.rot_speed, 0.001)
+                mod.strength = props.rot_strength
+                mod.phase = props.rot_phase + spatial_offset + (idx * 1731.5)
+                mod.use_influence = True
+                mod.influence = props.rot_influence
 
-            # Restrict Frame Range (Unified across location and rotation)
-            mod.use_restricted_range = props.use_restricted_range
-            if props.use_restricted_range:
-                mod.frame_start = props.frame_start
-                mod.frame_end = props.frame_end
-                mod.blend_in = max(props.blend_in, 0.0)
-                mod.blend_out = max(props.blend_out, 0.0)
-    else:
-        # Remove location wiggle if disabled
-        fcurves = get_object_fcurves(ob)
-        for fc in fcurves:
-            if fc.data_path == "delta_location":
-                mod = find_wiggle_modifier(fc, WIGGLE_MOD_PREFIX)
-                if mod:
-                    fc.modifiers.remove(mod)
+                mod.use_restricted_range = props.use_restricted_range
+                if props.use_restricted_range:
+                    mod.frame_start = props.frame_start
+                    mod.frame_end = props.frame_end
+                    mod.blend_in = max(props.blend_in, 0.0)
+                    mod.blend_out = max(props.blend_out, 0.0)
+        else:
+            fcurves = get_object_fcurves(ob)
+            for fc in fcurves:
+                if fc.data_path == "delta_rotation_euler":
+                    mod = find_wiggle_modifier(fc, WIGGLE_MOD_PREFIX)
+                    if mod:
+                        fc.modifiers.remove(mod)
+
+        # Location Wiggle
+        if props.enable_location:
+            for idx in range(3):
+                fc = ensure_fcurve(ob, "delta_location", idx)
+                if not fc:
+                    continue
+                mod = find_wiggle_modifier(fc, WIGGLE_LOCATION_MOD) or find_wiggle_modifier(fc, WIGGLE_MOD_PREFIX)
+                if mod is None:
+                    mod = fc.modifiers.new(type='NOISE')
+                    mod.name = WIGGLE_LOCATION_MOD
+
+                mod.scale = max(props.loc_speed, 0.001)
+                mod.strength = props.loc_strength
+                mod.phase = props.loc_phase + spatial_offset + 50000.0 + (idx * 1731.5)
+                mod.use_influence = True
+                mod.influence = props.loc_influence
+
+                mod.use_restricted_range = props.use_restricted_range
+                if props.use_restricted_range:
+                    mod.frame_start = props.frame_start
+                    mod.frame_end = props.frame_end
+                    mod.blend_in = max(props.blend_in, 0.0)
+                    mod.blend_out = max(props.blend_out, 0.0)
+        else:
+            fcurves = get_object_fcurves(ob)
+            for fc in fcurves:
+                if fc.data_path == "delta_location":
+                    mod = find_wiggle_modifier(fc, WIGGLE_MOD_PREFIX)
+                    if mod:
+                        fc.modifiers.remove(mod)
 
     ob.update_tag()
 
@@ -248,11 +376,11 @@ def remove_wiggle_from_object(ob):
     to_remove_fcurves = []
     for fc in list(fcurves):
         if fc.data_path in ("delta_rotation_euler", "delta_location"):
-            wiggle_mods = [m for m in fc.modifiers if m.type == 'NOISE' and m.name.startswith(WIGGLE_MOD_PREFIX)]
+            wiggle_mods = [m for m in fc.modifiers if m.name.startswith(WIGGLE_MOD_PREFIX)]
             for m in wiggle_mods:
                 fc.modifiers.remove(m)
-            # If no modifiers left and only 1 static keyframe, mark for removal
-            if len(fc.modifiers) == 0 and len(fc.keyframe_points) <= 1:
+            # If no modifiers left, clear multi-keyframes or mark for removal
+            if len(fc.modifiers) == 0:
                 to_remove_fcurves.append(fc)
 
     if to_remove_fcurves:
@@ -292,11 +420,21 @@ def sync_props_from_modifiers(ob):
     props = ob.wiggle_props
     _is_syncing_props = True
     try:
+        # Check if cycles loop is active
+        has_cycles = any(m.type == 'CYCLES' and m.name == WIGGLE_CYCLES_MOD for fc in fcurves for m in fc.modifiers)
+        if has_cycles:
+            props.enable_loop = True
+            for fc in fcurves:
+                if len(fc.keyframe_points) > 1:
+                    props.loop_start = fc.keyframe_points[0].co[0]
+                    props.loop_end = fc.keyframe_points[-1].co[0]
+                    break
+
         has_rot = False
         for fc in fcurves:
             if fc.data_path == "delta_rotation_euler":
                 mod = find_wiggle_modifier(fc, WIGGLE_MOD_PREFIX)
-                if mod:
+                if mod and mod.type == 'NOISE':
                     props.rot_speed = mod.scale
                     props.rot_strength = mod.strength
                     props.rot_influence = mod.influence
@@ -308,13 +446,14 @@ def sync_props_from_modifiers(ob):
                         props.blend_out = mod.blend_out
                     has_rot = True
                     break
-        props.enable_rotation = has_rot
+        if not has_cycles:
+            props.enable_rotation = has_rot
 
         has_loc = False
         for fc in fcurves:
             if fc.data_path == "delta_location":
                 mod = find_wiggle_modifier(fc, WIGGLE_MOD_PREFIX)
-                if mod:
+                if mod and mod.type == 'NOISE':
                     props.loc_speed = mod.scale
                     props.loc_strength = mod.strength
                     props.loc_influence = mod.influence
@@ -326,7 +465,8 @@ def sync_props_from_modifiers(ob):
                         props.blend_out = mod.blend_out
                     has_loc = True
                     break
-        props.enable_location = has_loc
+        if not has_cycles:
+            props.enable_location = has_loc
     finally:
         _is_syncing_props = False
 
@@ -379,6 +519,11 @@ def on_prop_update(self, context):
                         ob_props.frame_end = self.frame_end
                         ob_props.blend_in = self.blend_in
                         ob_props.blend_out = self.blend_out
+
+                        ob_props.enable_loop = self.enable_loop
+                        ob_props.loop_start = self.loop_start
+                        ob_props.loop_end = self.loop_end
+                        ob_props.loop_repeat = self.loop_repeat
 
                         apply_wiggle_to_object(ob, ob_props)
     finally:
@@ -468,7 +613,7 @@ class WiggleObjectProperties(bpy.types.PropertyGroup):
         update=on_prop_update,
     )
 
-    # Frame Range Restriction Settings (Unified set of 4 for location and rotation)
+    # Restrict Frame Range Settings
     use_restricted_range: bpy.props.BoolProperty(
         name="Restrict Frame Range",
         description="Limit procedural wiggle noise to a specific frame range",
@@ -499,6 +644,32 @@ class WiggleObjectProperties(bpy.types.PropertyGroup):
         description="Number of frames to smoothly blend out wiggle from full strength to 0",
         default=0.0,
         min=0.0,
+        update=on_prop_update,
+    )
+
+    # Seamless Loop Settings (No NLA required)
+    enable_loop: bpy.props.BoolProperty(
+        name="Seamless Loop",
+        description="Generate a mathematically seamless looping noise cycle without NLA",
+        default=False,
+        update=on_prop_update,
+    )
+    loop_start: bpy.props.FloatProperty(
+        name="Loop Start",
+        description="First frame of the seamless loop cycle",
+        default=1.0,
+        update=on_prop_update,
+    )
+    loop_end: bpy.props.FloatProperty(
+        name="Loop End",
+        description="End frame of the seamless loop cycle (where cycle repeats)",
+        default=100.0,
+        update=on_prop_update,
+    )
+    loop_repeat: bpy.props.BoolProperty(
+        name="Repeat Cycle",
+        description="Repeat the loop cycle indefinitely before and after with an F-Curve Cycles modifier",
+        default=True,
         update=on_prop_update,
     )
 
@@ -602,6 +773,11 @@ class OBJECT_OT_wiggle_apply(bpy.types.Operator):
                 ob_props.blend_in = active_props.blend_in
                 ob_props.blend_out = active_props.blend_out
 
+                ob_props.enable_loop = active_props.enable_loop
+                ob_props.loop_start = active_props.loop_start
+                ob_props.loop_end = active_props.loop_end
+                ob_props.loop_repeat = active_props.loop_repeat
+
             apply_wiggle_to_object(ob, ob.wiggle_props)
 
         self.report({'INFO'}, f"Wiggle applied to {len(targets)} object(s)")
@@ -631,6 +807,29 @@ class OBJECT_OT_wiggle_remove(bpy.types.Operator):
             count += 1
 
         self.report({'INFO'}, f"Wiggle removed from {count} object(s)")
+        return {'FINISHED'}
+
+
+class OBJECT_OT_wiggle_match_scene_range(bpy.types.Operator):
+    """Match loop range to scene playback frame range"""
+    bl_idname = "object.wiggle_match_scene_range"
+    bl_label = "Match Scene Range"
+    bl_description = "Set loop start and end frames from current scene playback range"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None
+
+    def execute(self, context):
+        targets = [o for o in (context.selected_objects if context.selected_objects else [context.active_object]) if o is not None]
+        scene = context.scene
+        for ob in targets:
+            ob.wiggle_props.loop_start = scene.frame_start
+            ob.wiggle_props.loop_end = scene.frame_end
+            if ob.wiggle_props.enable_loop and has_wiggle_modifiers(ob):
+                apply_wiggle_to_object(ob, ob.wiggle_props)
+
         return {'FINISHED'}
 
 
@@ -732,19 +931,34 @@ class OBJECT_PT_wiggle_panel(bpy.types.Panel):
             col.prop(props, "loc_phase")
             col.prop(props, "loc_influence")
 
-        # Restrict Frame Range Box
-        range_box = layout.box()
-        range_header = range_box.row(align=True)
-        range_header.prop(props, "use_restricted_range", text="Restrict Frame Range", icon='TIME')
+        # Seamless Looping Box (Without NLA)
+        loop_box = layout.box()
+        loop_header = loop_box.row(align=True)
+        loop_header.prop(props, "enable_loop", text="Seamless Looping (No NLA)", icon='FILE_REFRESH')
 
-        if props.use_restricted_range:
-            col = range_box.column(align=True)
+        if props.enable_loop:
+            col = loop_box.column(align=True)
             row = col.row(align=True)
-            row.prop(props, "frame_start")
-            row.prop(props, "frame_end")
+            row.prop(props, "loop_start")
+            row.prop(props, "loop_end")
             row2 = col.row(align=True)
-            row2.prop(props, "blend_in")
-            row2.prop(props, "blend_out")
+            row2.prop(props, "loop_repeat")
+            row2.operator("object.wiggle_match_scene_range", text="Match Scene", icon='TIME')
+
+        # Restrict Frame Range Box (Only if not looping)
+        if not props.enable_loop:
+            range_box = layout.box()
+            range_header = range_box.row(align=True)
+            range_header.prop(props, "use_restricted_range", text="Restrict Frame Range", icon='TIME')
+
+            if props.use_restricted_range:
+                col = range_box.column(align=True)
+                row = col.row(align=True)
+                row.prop(props, "frame_start")
+                row.prop(props, "frame_end")
+                row2 = col.row(align=True)
+                row2.prop(props, "blend_in")
+                row2.prop(props, "blend_out")
 
         # Variation & Spatial Offsets Box
         var_box = layout.box()
@@ -799,6 +1013,7 @@ classes = [
     WiggleObjectProperties,
     OBJECT_OT_wiggle_apply,
     OBJECT_OT_wiggle_remove,
+    OBJECT_OT_wiggle_match_scene_range,
     OBJECT_OT_wiggle_reroll_seed,
     OBJECT_OT_wiggle_sync,
     OBJECT_PT_wiggle_panel,
