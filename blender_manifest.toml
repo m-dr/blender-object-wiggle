@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "object_wiggle"
-version = "1.0.0"
+version = "0.1.0"
 name = "Object Wiggle"
 tagline = "Procedural noise transforms for objects with multi-object editing and Blender 5.2 slotted action support"
 maintainer = "m-dr"
