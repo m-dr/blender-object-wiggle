@@ -1,5 +1,8 @@
 # Object Wiggle
 
+> [!NOTE]
+> **This extension has been incorporated into [Noise Wiggler](https://github.com/m-dr/blender-noise-wiggler)** — a unified extension combining both Object Wiggle and Armature/Bone Wiggle into a single interface with hierarchy falloff curves, motion presets, and dual-mode editing.
+
 A modern Blender 5.2+ extension that applies procedural noise transforms to object delta transforms, enabling dynamic, organic secondary motion for single or multiple objects with full Slotted Action compatibility, seamless loops (without NLA), frame ranges, and spatial wave offsets.
 
 ## Features
