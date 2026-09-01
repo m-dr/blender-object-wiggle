@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+
+id = "object_wiggle"
+version = "1.0.0"
+name = "Object Wiggle"
+tagline = "Procedural noise transforms for objects with multi-object editing and Blender 5.2 slotted action support"
+maintainer = "m-dr"
+type = "add-on"
+blender_version_min = "5.2.0"
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+tags = [
+  "Animation",
+  "Object",
+]
+website = "https://github.com/m-dr/blender-object-wiggle"
