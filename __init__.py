@@ -1,15 +1,16 @@
 import bpy
 import bpy_extras.anim_utils
 import random
+from mathutils import Vector
 from bpy.app.handlers import persistent
 
 bl_info = {
     "name": "Object Wiggle",
     "author": "m-dr",
-    "version": (0, 1, 0),
+    "version": (0, 1, 2),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Wiggle",
-    "description": "Procedural noise transforms for objects with multi-object editing and Blender 5.2 slotted action support",
+    "description": "Procedural noise transforms for objects with spatial offsets, multi-object editing and Blender 5.2 slotted action support",
     "category": "Animation",
 }
 
@@ -111,6 +112,46 @@ def has_wiggle_modifiers(ob):
     return False
 
 
+def calculate_spatial_offset(ob, props):
+    """
+    Computes base phase offset using Random/Name Hash, Linear Directional Wave, or Radial Ripple.
+    Accounts for resting base positions across parent hierarchies.
+    """
+    seed_base = props.seed * 1000.0
+
+    if props.offset_mode == 'RANDOM':
+        obj_hash = (abs(hash(ob.name)) % 100000) * 13.37
+        return seed_base + (obj_hash if props.use_unique_seed else 0.0)
+
+    # True evaluated world resting coordinates (excluding active delta translation)
+    world_pos = ob.matrix_world.translation - Vector(ob.delta_location)
+    guide = props.guide_object
+
+    if props.offset_mode == 'LINEAR':
+        if guide and guide != ob:
+            try:
+                rel_pos = guide.matrix_world.inverted_safe() @ world_pos
+            except Exception:
+                guide_pos = guide.matrix_world.translation - Vector(guide.delta_location)
+                rel_pos = world_pos - guide_pos
+        else:
+            rel_pos = world_pos
+
+        axis = props.offset_axis.lower()
+        axis_coord = getattr(rel_pos, axis, 0.0)
+        return seed_base + (axis_coord * props.spatial_scale)
+
+    if props.offset_mode == 'RADIAL':
+        if guide and guide != ob:
+            origin = guide.matrix_world.translation - Vector(guide.delta_location)
+        else:
+            origin = Vector((0.0, 0.0, 0.0))
+        dist = (world_pos - origin).length
+        return seed_base + (dist * props.spatial_scale)
+
+    return seed_base
+
+
 def apply_wiggle_to_object(ob, props=None):
     """
     Applies or updates Wiggle noise modifiers on an object's delta transforms.
@@ -120,9 +161,7 @@ def apply_wiggle_to_object(ob, props=None):
     if props is None:
         props = ob.wiggle_props
 
-    # Deterministic base seed per object and user seed
-    obj_hash = (abs(hash(ob.name)) % 100000) * 13.37
-    seed_offset = props.seed * 1000.0 + (obj_hash if props.use_unique_seed else 0.0)
+    spatial_offset = calculate_spatial_offset(ob, props)
 
     # --- Rotation Wiggle ---
     if props.enable_rotation:
@@ -137,7 +176,7 @@ def apply_wiggle_to_object(ob, props=None):
 
             mod.scale = max(props.rot_speed, 0.001)
             mod.strength = props.rot_strength
-            mod.phase = props.rot_phase + seed_offset + (idx * 1731.5)
+            mod.phase = props.rot_phase + spatial_offset + (idx * 1731.5)
             mod.use_influence = True
             mod.influence = props.rot_influence
     else:
@@ -162,7 +201,7 @@ def apply_wiggle_to_object(ob, props=None):
 
             mod.scale = max(props.loc_speed, 0.001)
             mod.strength = props.loc_strength
-            mod.phase = props.loc_phase + seed_offset + 50000.0 + (idx * 1731.5)
+            mod.phase = props.loc_phase + spatial_offset + 50000.0 + (idx * 1731.5)
             mod.use_influence = True
             mod.influence = props.loc_influence
     else:
@@ -274,36 +313,40 @@ def on_prop_update(self, context):
 
     _is_updating_props = True
     try:
-        active_ob = context.active_object
-        selected_obs = context.selected_objects
+        source_ob = getattr(self, "id_data", None)
+        if source_ob and isinstance(source_ob, bpy.types.Object):
+            if has_wiggle_modifiers(source_ob):
+                apply_wiggle_to_object(source_ob, self)
 
-        if not selected_obs:
-            if active_ob and has_wiggle_modifiers(active_ob):
-                apply_wiggle_to_object(active_ob)
-            return
+        if context:
+            active_ob = context.active_object
+            selected_obs = context.selected_objects
 
-        # If active object has wiggle or multiple objects are selected with wiggle active
-        for ob in selected_obs:
-            if ob == active_ob:
-                if has_wiggle_modifiers(ob):
-                    apply_wiggle_to_object(ob, ob.wiggle_props)
-            else:
-                # Copy settings from active object if other object has wiggle enabled
-                if has_wiggle_modifiers(ob):
-                    ob_props = ob.wiggle_props
-                    ob_props.rot_speed = self.rot_speed
-                    ob_props.rot_strength = self.rot_strength
-                    ob_props.rot_phase = self.rot_phase
-                    ob_props.rot_influence = self.rot_influence
-                    ob_props.enable_rotation = self.enable_rotation
+            # Propagate to other selected objects if user adjusted the active object
+            if source_ob == active_ob and selected_obs and len(selected_obs) > 1:
+                for ob in selected_obs:
+                    if ob != active_ob and has_wiggle_modifiers(ob):
+                        ob_props = ob.wiggle_props
+                        ob_props.rot_speed = self.rot_speed
+                        ob_props.rot_strength = self.rot_strength
+                        ob_props.rot_phase = self.rot_phase
+                        ob_props.rot_influence = self.rot_influence
+                        ob_props.enable_rotation = self.enable_rotation
 
-                    ob_props.loc_speed = self.loc_speed
-                    ob_props.loc_strength = self.loc_strength
-                    ob_props.loc_phase = self.loc_phase
-                    ob_props.loc_influence = self.loc_influence
-                    ob_props.enable_location = self.enable_location
+                        ob_props.loc_speed = self.loc_speed
+                        ob_props.loc_strength = self.loc_strength
+                        ob_props.loc_phase = self.loc_phase
+                        ob_props.loc_influence = self.loc_influence
+                        ob_props.enable_location = self.enable_location
 
-                    apply_wiggle_to_object(ob, ob_props)
+                        ob_props.offset_mode = self.offset_mode
+                        ob_props.offset_axis = self.offset_axis
+                        ob_props.guide_object = self.guide_object
+                        ob_props.spatial_scale = self.spatial_scale
+                        ob_props.seed = self.seed
+                        ob_props.use_unique_seed = self.use_unique_seed
+
+                        apply_wiggle_to_object(ob, ob_props)
     finally:
         _is_updating_props = False
 
@@ -391,6 +434,44 @@ class WiggleObjectProperties(bpy.types.PropertyGroup):
         update=on_prop_update,
     )
 
+    # Offset & Spatial Mode Settings
+    offset_mode: bpy.props.EnumProperty(
+        name="Offset Mode",
+        description="Spatial distribution method for noise phase offsets across objects",
+        items=[
+            ('RANDOM', "Per-Object (Random)", "Individual random phase offset per object (uncorrelated motion)"),
+            ('LINEAR', "Directional Wave", "Wave offset travelling along a spatial axis (world or guide object)"),
+            ('RADIAL', "Radial Ripple", "Expanding ripple waves based on distance from world origin or guide object"),
+        ],
+        default='RANDOM',
+        update=on_prop_update,
+    )
+    offset_axis: bpy.props.EnumProperty(
+        name="Axis",
+        description="Direction axis for directional wave offset",
+        items=[
+            ('X', "X", "Wave along X axis"),
+            ('Y', "Y", "Wave along Y axis"),
+            ('Z', "Z", "Wave along Z axis"),
+        ],
+        default='X',
+        update=on_prop_update,
+    )
+    guide_object: bpy.props.PointerProperty(
+        type=bpy.types.Object,
+        name="Guide / Origin Object",
+        description="Optional reference object (e.g. Empty) to define the center or orientation of spatial waves",
+        update=on_prop_update,
+    )
+    spatial_scale: bpy.props.FloatProperty(
+        name="Spatial Scale",
+        description="Controls wave density/frequency across distance (higher = tighter waves)",
+        default=10.0,
+        soft_min=-100.0,
+        soft_max=100.0,
+        update=on_prop_update,
+    )
+
     # Seed Settings
     seed: bpy.props.IntProperty(
         name="Seed",
@@ -399,7 +480,7 @@ class WiggleObjectProperties(bpy.types.PropertyGroup):
         update=on_prop_update,
     )
     use_unique_seed: bpy.props.BoolProperty(
-        name="Per-Object Offset",
+        name="Per-Object Variation",
         description="Automatically offset noise phase per object so multiple objects do not wiggle identically",
         default=True,
         update=on_prop_update,
@@ -418,7 +499,7 @@ class OBJECT_OT_wiggle_apply(bpy.types.Operator):
         return context.active_object is not None or len(context.selected_objects) > 0
 
     def execute(self, context):
-        targets = context.selected_objects if context.selected_objects else ([context.active_object] if context.active_object else [])
+        targets = [o for o in (context.selected_objects if context.selected_objects else [context.active_object]) if o is not None]
         if not targets:
             self.report({'WARNING'}, "No objects selected")
             return {'CANCELLED'}
@@ -427,7 +508,6 @@ class OBJECT_OT_wiggle_apply(bpy.types.Operator):
 
         for ob in targets:
             if active_props and ob != context.active_object:
-                # Sync active settings to other selected objects
                 ob_props = ob.wiggle_props
                 ob_props.rot_speed = active_props.rot_speed
                 ob_props.rot_strength = active_props.rot_strength
@@ -440,6 +520,12 @@ class OBJECT_OT_wiggle_apply(bpy.types.Operator):
                 ob_props.loc_phase = active_props.loc_phase
                 ob_props.loc_influence = active_props.loc_influence
                 ob_props.enable_location = active_props.enable_location
+
+                ob_props.offset_mode = active_props.offset_mode
+                ob_props.offset_axis = active_props.offset_axis
+                ob_props.guide_object = active_props.guide_object
+                ob_props.spatial_scale = active_props.spatial_scale
+                ob_props.seed = active_props.seed
                 ob_props.use_unique_seed = active_props.use_unique_seed
 
             apply_wiggle_to_object(ob, ob.wiggle_props)
@@ -460,7 +546,7 @@ class OBJECT_OT_wiggle_remove(bpy.types.Operator):
         return context.active_object is not None or len(context.selected_objects) > 0
 
     def execute(self, context):
-        targets = context.selected_objects if context.selected_objects else ([context.active_object] if context.active_object else [])
+        targets = [o for o in (context.selected_objects if context.selected_objects else [context.active_object]) if o is not None]
         if not targets:
             self.report({'WARNING'}, "No objects selected")
             return {'CANCELLED'}
@@ -486,7 +572,7 @@ class OBJECT_OT_wiggle_reroll_seed(bpy.types.Operator):
         return context.active_object is not None
 
     def execute(self, context):
-        targets = context.selected_objects if context.selected_objects else [context.active_object]
+        targets = [o for o in (context.selected_objects if context.selected_objects else [context.active_object]) if o is not None]
         new_seed = random.randint(0, 99999)
         for ob in targets:
             ob.wiggle_props.seed = new_seed
@@ -572,14 +658,37 @@ class OBJECT_PT_wiggle_panel(bpy.types.Panel):
             col.prop(props, "loc_phase")
             col.prop(props, "loc_influence")
 
-        # Seed & Randomization Box
-        seed_box = layout.box()
-        seed_box.label(text="Randomization & Variation", icon='RNDCURVE')
-        col = seed_box.column(align=True)
-        seed_row = col.row(align=True)
-        seed_row.prop(props, "seed")
-        seed_row.operator("object.wiggle_reroll_seed", text="", icon='FILE_REFRESH')
-        col.prop(props, "use_unique_seed")
+        # Variation & Spatial Offsets Box
+        var_box = layout.box()
+        var_box.label(text="Variation & Spatial Offsets", icon='RNDCURVE')
+        col = var_box.column(align=True)
+        col.prop(props, "offset_mode", text="")
+
+        if props.offset_mode == 'RANDOM':
+            seed_row = col.row(align=True)
+            seed_row.prop(props, "seed")
+            seed_row.operator("object.wiggle_reroll_seed", text="", icon='FILE_REFRESH')
+            col.prop(props, "use_unique_seed")
+
+        elif props.offset_mode == 'LINEAR':
+            axis_row = col.row(align=True)
+            axis_row.label(text="Direction Axis:")
+            axis_row.prop(props, "offset_axis", expand=True)
+
+            col.prop(props, "guide_object", text="Guide / Empty")
+            col.prop(props, "spatial_scale")
+
+            seed_row = col.row(align=True)
+            seed_row.prop(props, "seed")
+            seed_row.operator("object.wiggle_reroll_seed", text="", icon='FILE_REFRESH')
+
+        elif props.offset_mode == 'RADIAL':
+            col.prop(props, "guide_object", text="Origin / Empty")
+            col.prop(props, "spatial_scale")
+
+            seed_row = col.row(align=True)
+            seed_row.prop(props, "seed")
+            seed_row.operator("object.wiggle_reroll_seed", text="", icon='FILE_REFRESH')
 
 
 @persistent
