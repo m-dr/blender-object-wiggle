@@ -7,10 +7,10 @@ from bpy.app.handlers import persistent
 bl_info = {
     "name": "Object Wiggle",
     "author": "m-dr",
-    "version": (0, 1, 2),
+    "version": (0, 1, 3),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Wiggle",
-    "description": "Procedural noise transforms for objects with spatial offsets, multi-object editing and Blender 5.2 slotted action support",
+    "description": "Procedural noise transforms for objects with frame ranges, spatial offsets, multi-object editing and Blender 5.2 slotted action support",
     "category": "Animation",
 }
 
@@ -179,6 +179,14 @@ def apply_wiggle_to_object(ob, props=None):
             mod.phase = props.rot_phase + spatial_offset + (idx * 1731.5)
             mod.use_influence = True
             mod.influence = props.rot_influence
+
+            # Restrict Frame Range (Unified across location and rotation)
+            mod.use_restricted_range = props.use_restricted_range
+            if props.use_restricted_range:
+                mod.frame_start = props.frame_start
+                mod.frame_end = props.frame_end
+                mod.blend_in = max(props.blend_in, 0.0)
+                mod.blend_out = max(props.blend_out, 0.0)
     else:
         # Remove rotation wiggle if disabled
         fcurves = get_object_fcurves(ob)
@@ -204,6 +212,14 @@ def apply_wiggle_to_object(ob, props=None):
             mod.phase = props.loc_phase + spatial_offset + 50000.0 + (idx * 1731.5)
             mod.use_influence = True
             mod.influence = props.loc_influence
+
+            # Restrict Frame Range (Unified across location and rotation)
+            mod.use_restricted_range = props.use_restricted_range
+            if props.use_restricted_range:
+                mod.frame_start = props.frame_start
+                mod.frame_end = props.frame_end
+                mod.blend_in = max(props.blend_in, 0.0)
+                mod.blend_out = max(props.blend_out, 0.0)
     else:
         # Remove location wiggle if disabled
         fcurves = get_object_fcurves(ob)
@@ -284,6 +300,12 @@ def sync_props_from_modifiers(ob):
                     props.rot_speed = mod.scale
                     props.rot_strength = mod.strength
                     props.rot_influence = mod.influence
+                    if mod.use_restricted_range:
+                        props.use_restricted_range = True
+                        props.frame_start = mod.frame_start
+                        props.frame_end = mod.frame_end
+                        props.blend_in = mod.blend_in
+                        props.blend_out = mod.blend_out
                     has_rot = True
                     break
         props.enable_rotation = has_rot
@@ -296,6 +318,12 @@ def sync_props_from_modifiers(ob):
                     props.loc_speed = mod.scale
                     props.loc_strength = mod.strength
                     props.loc_influence = mod.influence
+                    if mod.use_restricted_range and not has_rot:
+                        props.use_restricted_range = True
+                        props.frame_start = mod.frame_start
+                        props.frame_end = mod.frame_end
+                        props.blend_in = mod.blend_in
+                        props.blend_out = mod.blend_out
                     has_loc = True
                     break
         props.enable_location = has_loc
@@ -345,6 +373,12 @@ def on_prop_update(self, context):
                         ob_props.spatial_scale = self.spatial_scale
                         ob_props.seed = self.seed
                         ob_props.use_unique_seed = self.use_unique_seed
+
+                        ob_props.use_restricted_range = self.use_restricted_range
+                        ob_props.frame_start = self.frame_start
+                        ob_props.frame_end = self.frame_end
+                        ob_props.blend_in = self.blend_in
+                        ob_props.blend_out = self.blend_out
 
                         apply_wiggle_to_object(ob, ob_props)
     finally:
@@ -431,6 +465,40 @@ class WiggleObjectProperties(bpy.types.PropertyGroup):
         default=1.0,
         min=0.0,
         max=1.0,
+        update=on_prop_update,
+    )
+
+    # Frame Range Restriction Settings (Unified set of 4 for location and rotation)
+    use_restricted_range: bpy.props.BoolProperty(
+        name="Restrict Frame Range",
+        description="Limit procedural wiggle noise to a specific frame range",
+        default=False,
+        update=on_prop_update,
+    )
+    frame_start: bpy.props.FloatProperty(
+        name="Start",
+        description="First frame to apply procedural wiggle noise",
+        default=1.0,
+        update=on_prop_update,
+    )
+    frame_end: bpy.props.FloatProperty(
+        name="End",
+        description="Last frame to apply procedural wiggle noise",
+        default=250.0,
+        update=on_prop_update,
+    )
+    blend_in: bpy.props.FloatProperty(
+        name="Blend In",
+        description="Number of frames to smoothly blend in wiggle from 0 to full strength",
+        default=0.0,
+        min=0.0,
+        update=on_prop_update,
+    )
+    blend_out: bpy.props.FloatProperty(
+        name="Blend Out",
+        description="Number of frames to smoothly blend out wiggle from full strength to 0",
+        default=0.0,
+        min=0.0,
         update=on_prop_update,
     )
 
@@ -527,6 +595,12 @@ class OBJECT_OT_wiggle_apply(bpy.types.Operator):
                 ob_props.spatial_scale = active_props.spatial_scale
                 ob_props.seed = active_props.seed
                 ob_props.use_unique_seed = active_props.use_unique_seed
+
+                ob_props.use_restricted_range = active_props.use_restricted_range
+                ob_props.frame_start = active_props.frame_start
+                ob_props.frame_end = active_props.frame_end
+                ob_props.blend_in = active_props.blend_in
+                ob_props.blend_out = active_props.blend_out
 
             apply_wiggle_to_object(ob, ob.wiggle_props)
 
@@ -657,6 +731,20 @@ class OBJECT_PT_wiggle_panel(bpy.types.Panel):
             col.prop(props, "loc_strength")
             col.prop(props, "loc_phase")
             col.prop(props, "loc_influence")
+
+        # Restrict Frame Range Box
+        range_box = layout.box()
+        range_header = range_box.row(align=True)
+        range_header.prop(props, "use_restricted_range", text="Restrict Frame Range", icon='TIME')
+
+        if props.use_restricted_range:
+            col = range_box.column(align=True)
+            row = col.row(align=True)
+            row.prop(props, "frame_start")
+            row.prop(props, "frame_end")
+            row2 = col.row(align=True)
+            row2.prop(props, "blend_in")
+            row2.prop(props, "blend_out")
 
         # Variation & Spatial Offsets Box
         var_box = layout.box()
