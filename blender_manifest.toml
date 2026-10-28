@@ -2,7 +2,7 @@ schema_version = "1.0.0"
 
 id = "object_wiggle"
 version = "0.1.4"
-name = "Object Wiggle"
+name = "Object Wiggle (DEV)"
 tagline = "Procedural noise transforms for objects with seamless loops, frame ranges, spatial offsets, multi-object editing and Blender 5.2 slotted action support"
 maintainer = "m-dr"
 type = "add-on"
