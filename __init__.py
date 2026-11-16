@@ -8,7 +8,7 @@ from bpy.app.handlers import persistent
 bl_info = {
     "name": "Object Wiggle (DEV)",
     "author": "m-dr",
-    "version": (0, 1, 4),
+    "version": (0, 1, 5),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Wiggle",
     "description": "Procedural noise transforms for objects with seamless loops, frame ranges, spatial offsets, multi-object editing and Blender 5.2 slotted action support",
