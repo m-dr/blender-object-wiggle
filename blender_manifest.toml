@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "object_wiggle"
-version = "0.1.5"
+version = "0.1.6"
 name = "Object Wiggle (DEV)"
 tagline = "Procedural noise transforms with seamless loops and offsets"
 maintainer = "m-dr"

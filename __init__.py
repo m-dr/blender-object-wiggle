@@ -8,7 +8,7 @@ from bpy.app.handlers import persistent
 bl_info = {
     "name": "Object Wiggle (DEV)",
     "author": "m-dr",
-    "version": (0, 1, 5),
+    "version": (0, 1, 6),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Wiggle",
     "description": "Procedural noise transforms for objects with seamless loops, frame ranges, spatial offsets, multi-object editing and Blender 5.2 slotted action support",
@@ -1029,11 +1029,25 @@ def register():
 
 
 def unregister():
-    if on_active_object_changed in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(on_active_object_changed)
+    try:
+        if on_active_object_changed in bpy.app.handlers.depsgraph_update_post:
+            bpy.app.handlers.depsgraph_update_post.remove(on_active_object_changed)
+    except Exception:
+        pass
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
-    del bpy.types.Object.wiggle_props
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
+    # Blender may have already cleared add-on owned ID-type properties by the
+    # time add-ons are unregistered on exit (seen on Blender 5.3), so never
+    # assume the property is still there: an exception here aborts the
+    # remaining unregister work and leaves the session half-cleaned.
+    if hasattr(bpy.types.Object, "wiggle_props"):
+        try:
+            del bpy.types.Object.wiggle_props
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
